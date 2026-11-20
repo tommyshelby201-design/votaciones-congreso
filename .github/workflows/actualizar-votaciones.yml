@@ -1,0 +1,30 @@
+# Guardar en el repositorio como: .github/workflows/actualizar-votaciones.yml
+# Corre todos los días a las 7:15 (hora argentina) y sube los CSV nuevos al repo.
+name: Actualizar votaciones
+
+on:
+  schedule:
+    - cron: "15 10 * * *"   # 10:15 UTC = 07:15 en Argentina
+  workflow_dispatch:         # botón para correrlo a mano
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pdfplumber pandas lxml
+      - run: python scraper_votaciones.py
+      - name: Guardar datos nuevos
+        run: |
+          git config user.name "bot-votaciones"
+          git config user.email "bot@users.noreply.github.com"
+          git add datos/
+          git diff --cached --quiet || git commit -m "Votaciones actualizadas $(date +%F)"
+          git push
