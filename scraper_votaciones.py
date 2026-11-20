@@ -34,7 +34,11 @@ PAUSA = 1.5            # segundos entre pedidos, para no sobrecargar los servido
 MAX_FALLOS = 15        # IDs vacíos seguidos antes de asumir que no hay más actas
 MAX_ACTAS = 300        # tope por corrida (la carga histórica se completa en varias corridas)
 
-HCDN_PDF = "https://votaciones.hcdn.gob.ar/pdf/acta/{id}"
+HCDN_DOMINIOS = [
+    "https://votaciones.diputados.gob.ar/pdf/acta/{id}",   # el que responde hoy
+    "https://votaciones.hcdn.gob.ar/pdf/acta/{id}",        # respaldo
+]
+HCDN_PDF = HCDN_DOMINIOS[0]
 SENADO_DETALLE = "https://www.senado.gob.ar/votaciones/detalleActa/{id}"  # verificar
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (investigacion academica; contacto: completar)"}
@@ -51,6 +55,22 @@ RE_FILA = re.compile(
     r"^(?P<nombre>[A-ZÁÉÍÓÚÑÜ'\"\-\. ]+,\s.+?)\s+(?P<resto>.+?)\s+"
     r"(?P<voto>" + "|".join(VOTOS) + r")$"
 )
+
+
+class SitioInaccesible(Exception):
+    pass
+
+
+def pedir(sesion, url, intentos=3):
+    """GET con reintentos. Devuelve None si la página no existe; lanza
+    SitioInaccesible si el servidor no responde (típico bloqueo a IPs del exterior)."""
+    for i in range(intentos):
+        try:
+            return sesion.get(url, timeout=(20, 60))
+        except requests.exceptions.RequestException as e:
+            ultimo = e
+            time.sleep(5 * (i + 1))
+    raise SitioInaccesible(f"{url}: {ultimo.__class__.__name__}")
 
 
 # ---------------------------------------------------------------- utilidades
@@ -120,7 +140,7 @@ def parsear_acta_diputados(pdf_bytes, acta_id):
         "negativos": num(r"Negativos\s+(?:\d+\s+){2,3}?(\d+)\s*$", texto) or num(r"Negativos\s+(\d+)", texto),
         "abstenciones": num(r"Abstenciones\s+(?:\d+\s+){1,2}?(\d+)\s*$", texto) or num(r"Abstenciones\s+(\d+)", texto),
         "resultado": (re.search(r"Resultado de la Votaci[oó]n:?\s*(\w+)", texto) or [None, ""])[1],
-        "fuente": HCDN_PDF.format(id=acta_id),
+        "fuente": HCDN_DOMINIOS[0].format(id=acta_id),
     }
 
     votos = votos_por_columnas(pdf_bytes, acta_id)
@@ -190,7 +210,16 @@ def bajar_diputados(desde, sesion):
     actual, fallos, total, ultimo_ok = desde, 0, 0, desde
     while fallos < MAX_FALLOS and total < MAX_ACTAS:
         actual += 1
-        r = sesion.get(HCDN_PDF.format(id=actual), timeout=60)
+        r = None
+        for i, plantilla in enumerate(HCDN_DOMINIOS):
+            try:
+                r = pedir(sesion, plantilla.format(id=actual), intentos=2)
+                if i:  # si respondió el respaldo, usarlo primero de ahora en más
+                    HCDN_DOMINIOS.insert(0, HCDN_DOMINIOS.pop(i))
+                break
+            except SitioInaccesible:
+                if i == len(HCDN_DOMINIOS) - 1:
+                    raise
         time.sleep(PAUSA)
         if r.status_code != 200 or not r.content.startswith(b"%PDF"):
             fallos += 1
@@ -218,7 +247,7 @@ def bajar_senado(desde, sesion):
     while fallos < MAX_FALLOS and total < MAX_ACTAS:
         actual += 1
         url = SENADO_DETALLE.format(id=actual)
-        r = sesion.get(url, timeout=60)
+        r = pedir(sesion, url)
         time.sleep(PAUSA)
         if r.status_code != 200:
             fallos += 1
@@ -279,18 +308,30 @@ def main():
     estado = cargar_estado()
     sesion = requests.Session()
     sesion.headers.update(HEADERS)
+    errores = []
 
     if args.camara in ("diputados", "ambas"):
         desde = args.desde if args.desde is not None else estado["diputados"]
-        estado["diputados"], n = bajar_diputados(desde, sesion)
-        print(f"Diputados: {n} actas nuevas (último ID {estado['diputados']})")
+        try:
+            estado["diputados"], n = bajar_diputados(desde, sesion)
+            print(f"Diputados: {n} actas nuevas (último ID {estado['diputados']})")
+        except SitioInaccesible as e:
+            errores.append(f"Diputados inaccesible: {e}")
         guardar_estado(estado)
 
     if args.camara in ("senado", "ambas"):
         desde = args.desde if args.desde is not None else estado["senado"]
-        estado["senado"], n = bajar_senado(desde, sesion)
-        print(f"Senado: {n} actas nuevas (último ID {estado['senado']})")
+        try:
+            estado["senado"], n = bajar_senado(desde, sesion)
+            print(f"Senado: {n} actas nuevas (último ID {estado['senado']})")
+        except SitioInaccesible as e:
+            errores.append(f"Senado inaccesible: {e}")
         guardar_estado(estado)
+
+    for e in errores:
+        print("ERROR:", e, "- si corre en GitHub, probablemente el sitio bloquea IPs del exterior.")
+    if errores:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
