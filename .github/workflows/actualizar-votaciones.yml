@@ -1,5 +1,5 @@
 # Guardar en el repositorio como: .github/workflows/actualizar-votaciones.yml
-# Corre todos los días a las 7:15 (hora argentina) y sube los CSV nuevos al repo.
+# Corre en los servidores de GitHub todos los días a las 7:15 (hora argentina).
 name: Actualizar votaciones
 
 on:
@@ -20,11 +20,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests pdfplumber pandas lxml
-      - run: python scraper_votaciones.py
+      - run: python scraper_votaciones.py --camara diputados
       - name: Guardar datos nuevos
+        if: always()   # guarda lo que se haya bajado aunque haya un error
         run: |
           git config user.name "bot-votaciones"
           git config user.email "bot@users.noreply.github.com"
-          git add datos/
+          git add datos/ || true
           git diff --cached --quiet || git commit -m "Votaciones actualizadas $(date +%F)"
           git push
